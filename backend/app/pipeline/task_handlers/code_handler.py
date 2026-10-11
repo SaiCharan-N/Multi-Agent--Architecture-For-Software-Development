@@ -9,7 +9,7 @@ import time
 from app.agents import developer
 from app.mcp_client import call_tool
 from app import events, ifs
-from app.pipeline import event_types as ev
+from app.pipeline import event_types as ev, intervention
 from app.pipeline.task_handlers.base import TaskHandler
 
 logger = logging.getLogger("aiopsforge.pipeline.code_handler")
@@ -31,6 +31,17 @@ class CodeTaskHandler(TaskHandler):
         # prompt. Passing it through here is the fix for "developer isn't
         # getting enough context from the tester."
         failure_analysis = state.get("_failure_analysis") if is_retry else None
+        # Failure Recovery: on a retry the Developer must SEE the code that
+        # failed (the diagnosis refers to its line numbers), and we keep it
+        # in state so qa_node can diff it against the version that finally
+        # passes and store "what changed" in long-term memory.
+        guided_regen = bool(state.pop("_guided_regen", False))
+        previous_code = state.get("code") if (is_retry or guided_regen) else None
+        if is_retry:
+            state["_prev_code"] = previous_code
+        # User intervention: anything the user told us at a pause point
+        # (project-wide, or about this task) goes into the prompt.
+        user_guidance = intervention.guidance_for(state, task.order)
         code, filename = await asyncio.to_thread(
             developer.generate_code,
             task,
@@ -39,6 +50,9 @@ class CodeTaskHandler(TaskHandler):
             memory_context=memory_context,
             original_request=state["request"] if communication_mode == "blackboard" else None,
             failure_analysis=failure_analysis,
+            previous_code=previous_code,
+            user_guidance=user_guidance,
+            framework=task.framework,
         )
 
         await call_tool(
